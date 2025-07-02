@@ -6,21 +6,24 @@ import time
 import psutil
 import pynvml
 import random
+import signal # NEW: Import signal for process group termination
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash
 
 # --- Basic Configuration ---
-UPLOAD_FOLDER = 'uploads'
-STREAMS_CONFIG_FILE = 'streams.json'
+# MODIFIED: Use /app/uploads for Render's persistent disk
+UPLOAD_FOLDER = os.environ.get('RENDER_DISK_PATH', 'uploads')
+STREAMS_CONFIG_FILE = os.path.join(UPLOAD_FOLDER, 'streams.json')
 SECRET_KEY = os.environ.get('SECRET_KEY', 'a-very-secret-and-hard-to-guess-key')
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Admin@123')
-PORT = int(os.environ.get('PORT', 10000)) # Render.com uses the PORT env var
+PORT = int(os.environ.get('PORT', 10000))
 
 # --- App Initialization ---
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['SECRET_KEY'] = SECRET_KEY
+# Ensure the mount point exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # In-memory store for active FFmpeg processes {stream_id: Popen_object}
@@ -40,7 +43,7 @@ def get_gpu_usage():
             "mem_used": f"{memory.used // 1024**2}MB",
         }
     except Exception:
-        return None # No GPU or nvidia-ml-py not installed
+        return None
 
 # --- Data Persistence ---
 def load_stream_configs():
@@ -66,55 +69,72 @@ def login_required(f):
     return decorated_function
 
 # --- FFmpeg Process Management ---
+
+# NEW: Function to log FFmpeg's output in a separate thread
+def log_stream_output(stream_id, process):
+    """Reads and prints the stderr from the ffmpeg process."""
+    # Use process.stderr, as ffmpeg logs its progress to stderr
+    for line in iter(process.stderr.readline, b''):
+        print(f"[ffmpeg:{stream_id}] {line.decode('utf-8').strip()}", flush=True)
+
 def start_stream(stream_id, config):
-    if stream_id in ACTIVE_STREAMS:
+    if stream_id in ACTIVE_STREAMS and ACTIVE_STREAMS[stream_id].poll() is None:
         print(f"Stream {stream_id} is already running.")
         return
 
     input_path = config['input']
     rtmp_urls = config['rtmp_urls']
 
-    # The magic command: -c copy avoids re-encoding, -stream_loop -1 loops indefinitely
-    # The 'tee' muxer allows streaming to multiple destinations simultaneously
-    # '-re' reads the input at its native frame rate, crucial for streaming files.
     command = [
-        'ffmpeg',
-        '-re',
-        '-stream_loop', '-1',
-        '-i', input_path,
-        '-c', 'copy',
-        '-f', 'tee',
-        '-map', '0:v?', '-map', '0:a?', # Map video and audio streams
+        'ffmpeg', '-re', '-stream_loop', '-1', '-i', input_path,
+        '-c', 'copy', '-f', 'tee', '-map', '0:v?', '-map', '0:a?',
     ]
-    
-    # Format the tee muxer string for multiple outputs
     tee_str = "|".join([f"[f=flv]{url}" for url in rtmp_urls])
     command.append(tee_str)
 
-    print(f"Starting stream {stream_id} with command: {' '.join(command)}")
+    print(f"Starting stream {stream_id} with command: {' '.join(command)}", flush=True)
     try:
-        # Start the process in the background
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # MODIFIED: Detach the FFmpeg process from the Gunicorn worker
+        # - start_new_session=True makes it an independent process group.
+        # - stderr=subprocess.PIPE allows us to capture logs.
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True # This is the magic key to detaching the process
+        )
         ACTIVE_STREAMS[stream_id] = process
-        print(f"Stream {stream_id} started with PID: {process.pid}")
+        print(f"Stream {stream_id} started with PID: {process.pid}", flush=True)
+
+        # NEW: Start a thread to monitor and log FFmpeg's output without blocking
+        log_thread = threading.Thread(target=log_stream_output, args=(stream_id, process))
+        log_thread.daemon = True # Allows main program to exit even if thread is running
+        log_thread.start()
+
     except Exception as e:
-        print(f"Error starting stream {stream_id}: {e}")
+        print(f"Error starting stream {stream_id}: {e}", flush=True)
 
 def stop_stream(stream_id):
     process = ACTIVE_STREAMS.pop(stream_id, None)
     if process:
+        print(f"Stopping stream {stream_id} with PID: {process.pid}", flush=True)
         try:
-            process.terminate() # Send SIGTERM
-            process.wait(timeout=5) # Wait for graceful shutdown
-            print(f"Stream {stream_id} terminated gracefully.")
+            # MODIFIED: Terminate the entire process group started by FFmpeg
+            # This is the proper way to kill a process started with start_new_session=True
+            pgid = os.getpgid(process.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            process.wait(timeout=5)
+            print(f"Stream {stream_id} terminated gracefully.", flush=True)
+        except (ProcessLookupError, PermissionError):
+            print(f"Process for stream {stream_id} already gone.", flush=True)
         except subprocess.TimeoutExpired:
-            process.kill() # Force kill if it doesn't terminate
-            print(f"Stream {stream_id} killed.")
+            print(f"Stream {stream_id} did not terminate gracefully, killing.", flush=True)
+            os.killpg(pgid, signal.SIGKILL)
     else:
-        print(f"Stream {stream_id} not found in active streams.")
+        print(f"Stream {stream_id} not found in active streams.", flush=True)
 
 
-# --- Flask Routes ---
+# --- Flask Routes (No changes needed below this line) ---
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -139,19 +159,16 @@ def logout():
 @login_required
 def dashboard():
     configs = load_stream_configs()
-    # Augment configs with runtime status
     for stream_id, config in configs.items():
         process = ACTIVE_STREAMS.get(stream_id)
-        if process and process.poll() is None: # poll() is None if process is running
+        if process and process.poll() is None:
             config['status'] = 'Running'
             config['pid'] = process.pid
         else:
             config['status'] = 'Stopped'
-            # Clean up dead processes from ACTIVE_STREAMS
             if stream_id in ACTIVE_STREAMS:
                 del ACTIVE_STREAMS[stream_id]
 
-    # System Usage
     cpu_usage = psutil.cpu_percent(interval=0.1)
     ram_usage = psutil.virtual_memory().percent
     gpu_usage = get_gpu_usage()
@@ -162,7 +179,7 @@ def dashboard():
 @login_required
 def add_stream():
     configs = load_stream_configs()
-    stream_id = f"stream_{int(time.time())}" # Unique ID based on timestamp
+    stream_id = f"stream_{int(time.time())}"
     
     input_type = request.form['input_type']
     stream_name = request.form.get('stream_name', f'Stream {len(configs)+1}')
@@ -180,16 +197,13 @@ def add_stream():
             flash('No file selected for upload.', 'danger')
             return redirect(url_for('dashboard'))
         file = request.files['video_file']
-        filename = f"{stream_id}_{file.filename}"
+        filename = f"{stream_id}_{file.filename.replace(' ', '_')}"
         input_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(input_path)
     
     configs[stream_id] = {
-        'id': stream_id,
-        'name': stream_name,
-        'input': input_path,
-        'input_type': input_type,
-        'rtmp_urls': rtmp_urls
+        'id': stream_id, 'name': stream_name, 'input': input_path,
+        'input_type': input_type, 'rtmp_urls': rtmp_urls
     }
     save_stream_configs(configs)
     flash(f"Stream '{stream_name}' added successfully.", "success")
@@ -217,45 +231,37 @@ def handle_stop(stream_id):
 @app.route('/action/delete/<stream_id>', methods=['POST'])
 @login_required
 def handle_delete(stream_id):
-    stop_stream(stream_id) # Ensure it's stopped before deleting
+    stop_stream(stream_id)
     configs = load_stream_configs()
     config_to_delete = configs.pop(stream_id, None)
     
     if config_to_delete:
-        # If it was an uploaded file, delete it
         if config_to_delete.get('input_type') == 'upload':
             file_path = config_to_delete.get('input')
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    print(f"Error removing file {file_path}: {e}", flush=True)
+
         save_stream_configs(configs)
         flash(f"Stream '{config_to_delete['name']}' deleted.", "success")
     else:
         flash("Stream not found.", "danger")
     return redirect(url_for('dashboard'))
 
-# --- Health and Wakeup Endpoints ---
-
 @app.route('/healthz')
 def health_check():
-    """Render health check endpoint."""
     return 'OK', 200
 
 @app.route('/wakeup')
 def wakeup():
-    """
-    Keep-alive endpoint for cron jobs.
-    Returns a simple random math problem to simulate activity.
-    """
     num1 = random.randint(1, 100)
     num2 = random.randint(1, 100)
     return jsonify({
-        'status': 'awake',
-        'message': 'Service is active.',
-        'task': f'What is {num1} + {num2}?',
-        'answer': num1 + num2
+        'status': 'awake', 'message': 'Service is active.',
+        'task': f'What is {num1} + {num2}?', 'answer': num1 + num2
     })
 
-# --- Main Execution ---
 if __name__ == '__main__':
-    # On Render, Gunicorn will run the app. This is for local development.
     app.run(host='0.0.0.0', port=PORT, debug=True)
