@@ -87,7 +87,10 @@ def start_stream(stream_id, config):
 
     command = [
         'ffmpeg', '-re', '-stream_loop', '-1', '-i', input_path,
-        '-c', 'copy', '-f', 'tee', '-map', '0:v?', '-map', '0:a?',
+        '-c:a', 'copy',  # Copy the audio stream as-is
+        '-c:v', 'copy',  # Copy the video stream as-is
+        '-bsf:v', 'h264_mp4toannexb', # APPLY THE FIX: Add the bitstream filter for video
+        '-f', 'tee', '-map', '0:v?', '-map', '0:a?',
     ]
     tee_str = "|".join([f"[f=flv]{url}" for url in rtmp_urls])
     command.append(tee_str)
