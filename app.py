@@ -68,8 +68,9 @@ def index():
         filename = ""
         if "video" in request.files:
             f = request.files["video"]
-            filename = os.path.join(UPLOAD_FOLDER, f.filename)
-            f.save(filename)
+            if f and f.filename:
+                filename = os.path.join(UPLOAD_FOLDER, f.filename)
+                f.save(filename)
         elif source.startswith("http"):
             filename = source
 
