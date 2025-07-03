@@ -3,6 +3,9 @@ name: Delete all files in repo
 on:
   workflow_dispatch:  # Cho phép chạy thủ công
 
+permissions:
+  contents: write
+
 jobs:
   delete-files:
     runs-on: ubuntu-latest
