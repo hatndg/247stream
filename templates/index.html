@@ -1,1 +1,19 @@
-<paste index.html here>
+<!doctype html><title>Auto Stream</title>
+<h2>Auto Streaming System</h2>
+<p><a href="/logout">Logout</a></p>
+<form method=post enctype=multipart/form-data>
+    Name: <input name="name"><br>
+    Video file: <input type=file name=video><br>
+    Or source URL: <input name="source"><br>
+    Loop video: <input type="checkbox" name="loop"><br>
+    RTMP Destinations (one per line):<br>
+    <textarea name="destinations" rows=4 cols=50></textarea><br>
+    <input type=submit value="Start Streaming">
+</form>
+
+<h3>Running Streams</h3>
+<ul>
+{% for s in streams %}
+  <li>{{ s.name }} - <a href="/stop/{{s.id}}">Stop</a></li>
+{% endfor %}
+</ul>
