@@ -104,18 +104,38 @@ def health(): return "<p>OK</p>", 200
 def uploaded_file(filename): return send_from_directory(UPLOAD_FOLDER, filename)
 
 def stream_loop(sid, src, dests, loop):
+    if not src:
+        print(f"[{sid}] Source not specified.")
+        return
+    if not os.path.exists(src) and not src.startswith("http"):
+        print(f"[{sid}] File does not exist: {src}")
+        return
+
     while True:
-        cmds = []
+        print(f"[{sid}] Starting FFmpeg stream...")
+        processes = []
+
         for d in dests:
             cmd = [
                 "ffmpeg", "-re",
-                "-stream_loop", "-1" if loop else "0",
                 "-i", src,
-                "-c:v", "copy", "-f", "flv", d
+                "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+                "-f", "flv", d
             ]
-            cmds.append(subprocess.Popen(cmd))
-        for p in cmds: p.wait()
-        if not loop: break
+            print(f"[{sid}] Running: {' '.join(cmd)}")
+            p = subprocess.Popen(cmd)
+            processes.append(p)
+
+        # Wait for all FFmpeg processes to exit
+        for p in processes:
+            p.wait()
+
+        if not loop:
+            break
+
+        print(f"[{sid}] FFmpeg exited, restarting due to loop=True")
+        time.sleep(1)
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
