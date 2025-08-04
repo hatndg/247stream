@@ -116,10 +116,16 @@ def stream_loop(sid, src, dests, loop):
         processes = []
 
         for d in dests:
+            # Sửa đổi lệnh ffmpeg tại đây
             cmd = [
                 "ffmpeg", "-re",
                 "-i", src,
                 "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+                # THÊM DÒNG NÀY: Đặt tần suất keyframe là 60 frames. 
+                # Với video 30fps, tương đương 2 giây/keyframe, đáp ứng yêu cầu của YouTube.
+                "-g", "60", 
+                # Thêm các tùy chọn audio để đảm bảo stream ổn định hơn (khuyến nghị)
+                "-c:a", "aac", "-ar", "44100", "-b:a", "128k",
                 "-f", "flv", d
             ]
             print(f"[{sid}] Running: {' '.join(cmd)}")
@@ -131,10 +137,19 @@ def stream_loop(sid, src, dests, loop):
             p.wait()
 
         if not loop:
+            print(f"[{sid}] Stream finished and loop is disabled.")
             break
 
         print(f"[{sid}] FFmpeg exited, restarting due to loop=True")
         time.sleep(1)
+
+    # Dọn dẹp stream khỏi danh sách khi vòng lặp kết thúc
+    print(f"[{sid}] Cleaning up stream from active processes.")
+    if sid in PROCESSES:
+        del PROCESSES[sid]
+    streams = load_streams()
+    streams_to_keep = [s for s in streams if s.get("id") != sid]
+    save_streams(streams_to_keep)
 
 
 if __name__ == "__main__":
