@@ -2,4 +2,4 @@ flask
 werkzeug
 psutil
 cryptography
-gunicorn==22.0.0
+gunicorn==23.0.0
