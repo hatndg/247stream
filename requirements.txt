@@ -2,3 +2,4 @@ flask
 werkzeug
 psutil
 cryptography
+gunicorn==22.0.0
