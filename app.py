@@ -160,6 +160,9 @@ def stream_loop(sid, src, dests, loop):
     streams_to_keep = [s for s in streams if s.get("id") != sid]
     save_streams(streams_to_keep)
 
+@app.route("/ping.js")
+def fake_js():
+    return 'console.log("Live247 initialized");', 200, {"Content-Type": "application/javascript"}
 
 
 if __name__ == "__main__":
