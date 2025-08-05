@@ -66,7 +66,6 @@ def decrypt_data(encrypted_bundle: dict, password: str) -> dict | None:
         decrypted_json = f.decrypt(encrypted_data)
         return json.loads(decrypted_json)
     except (InvalidToken, KeyError, TypeError):
-        # Lỗi nếu password sai, hoặc file ko đúng định dạng
         return None
 
 # === Core App Logic ===
@@ -123,8 +122,6 @@ def login():
         if hash_pass(pw) == real_hash:
             session["logged"] = True
             session["first"] = (pw == DEFAULT_PASS)
-            # Lưu plaintext pass tạm thời để dùng cho backup, sẽ bị xóa khi logout
-            # Cân nhắc rủi ro an ninh nếu session bị chiếm đoạt
             session["user_pass"] = pw 
             flash("Login successful!", "success")
             return redirect("/change" if session["first"] else "/")
@@ -139,14 +136,16 @@ def change():
         new_pass = request.form["newpass"]
         with open(PASS_FILE, "w") as f: f.write(hash_pass(new_pass))
         session["first"] = False
-        session["user_pass"] = new_pass # Cập nhật pass trong session
-        
-        # Tự động tạo backup mới với mật khẩu mới
+        session["user_pass"] = new_pass
         create_encrypted_backup(new_pass)
-        
         flash("Password changed successfully. A new encrypted backup has been created.", "success")
         return redirect("/")
     return render_template("change.html")
+
+@app.route("/ping.js")
+def fake_js():
+    return 'console.log("Live247 initialized");', 200, {"Content-Type": "application/javascript"}
+
 
 @app.route("/logout")
 def logout():
@@ -185,35 +184,42 @@ def index():
         flash(f"Stream '{name}' started!", "success")
         return redirect("/")
 
-    # Hiển thị trạng thái các luồng
     streams_with_status = []
     for s in load_streams():
         s['status'] = 'Running' if s['id'] in PROCESSES and PROCESSES[s['id']].is_alive() else 'Stopped'
         streams_with_status.append(s)
     return render_template("index.html", streams=streams_with_status)
 
+# *** HÀM STOP ĐÃ ĐƯỢC CẢI TIẾN ***
 @app.route("/stop/<sid>")
 def stop(sid):
     if not session.get("logged"): return redirect("/login")
     
-    # Dừng tiến trình ffmpeg
-    for proc in psutil.process_iter(['pid', 'cmdline']):
-        try:
-            if sid in " ".join(proc.info['cmdline']):
-                proc.kill()
-                print(f"Killed process for stream {sid}")
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-
-    # Xóa khỏi danh sách streams
     streams = load_streams()
+    stream_to_stop = next((s for s in streams if s["id"] == sid), None)
+
+    if stream_to_stop:
+        source_path = stream_to_stop['src']
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            # Kiểm tra cả tên tiến trình và dòng lệnh để chắc chắn
+            if proc.info['name'].lower().startswith('ffmpeg'):
+                try:
+                    # Kiểm tra xem đường dẫn nguồn có trong dòng lệnh của tiến trình không
+                    if source_path in " ".join(proc.info['cmdline']):
+                        print(f"Stopping process {proc.pid} for stream {sid} with source {source_path}")
+                        proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+
+    # Xóa khỏi danh sách streams trong file JSON
     streams_to_keep = [s for s in streams if s["id"] != sid]
     save_streams(streams_to_keep)
     
+    # Xóa khỏi danh sách tiến trình đang chạy trong bộ nhớ
     if sid in PROCESSES:
         del PROCESSES[sid]
         
-    flash(f"Stream {sid} has been stopped and removed.", "info")
+    flash(f"Stream has been stopped and removed.", "info")
     return redirect("/")
 
 @app.route("/manage_backup", methods=["GET"])
@@ -230,9 +236,7 @@ def download_backup():
         flash("Session expired. Please login again to create a backup.", "warning")
         return redirect(url_for('login'))
     
-    # Luôn tạo backup mới nhất trước khi tải
     create_encrypted_backup(password)
-    
     return send_from_directory(".", BACKUP_FILE, as_attachment=True)
     
 @app.route("/backup/restore", methods=["POST"])
@@ -258,17 +262,32 @@ def restore_from_backup():
         flash("Failed to decrypt backup. Incorrect password or corrupted file.", "danger")
         return redirect(url_for('manage_backup_page'))
     
-    # Dừng tất cả các luồng hiện tại
-    for sid in list(PROCESSES.keys()):
-        stop(sid)
+    current_sids = [s['id'] for s in load_streams()]
+    for current_sid in current_sids:
+        # Tái sử dụng hàm stop để dọn dẹp triệt để
+        stop_stream_internally(current_sid)
         
-    # Ghi đè streams.json và khởi động lại
     save_streams(decrypted_streams)
     for stream_info in decrypted_streams:
         start_stream_thread(stream_info)
         
     flash("Successfully restored streams from backup. All streams are restarting.", "success")
     return redirect(url_for('index'))
+
+def stop_stream_internally(sid):
+    """Hàm phụ để route restore sử dụng, không redirect"""
+    stream_to_stop = next((s for s in load_streams() if s["id"] == sid), None)
+    if stream_to_stop:
+        source_path = stream_to_stop['src']
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            if proc.info['name'].lower().startswith('ffmpeg'):
+                try:
+                    if source_path in " ".join(proc.info['cmdline']):
+                        proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+    if sid in PROCESSES:
+        del PROCESSES[sid]
     
 @app.route("/healthz")
 def health(): return "<p>OK</p>", 200
@@ -276,11 +295,11 @@ def health(): return "<p>OK</p>", 200
 @app.route("/uploads/<path:filename>")
 def uploaded_file(filename): return send_from_directory(UPLOAD_FOLDER, filename)
 
+# *** HÀM STREAM_LOOP ĐÃ ĐƯỢC SỬA LỖI ***
 def stream_loop(sid, src, dests, loop):
     if not src:
         print(f"[{sid}] Source not specified.")
         return
-    # Chỉ kiểm tra tồn tại cho file cục bộ
     if not src.startswith(("http", "rtmp", "rtsp")) and not os.path.exists(src):
         print(f"[{sid}] File does not exist: {src}")
         return
@@ -288,15 +307,17 @@ def stream_loop(sid, src, dests, loop):
     cmd_base = [
         "ffmpeg", "-re",
         "-i", src,
-        "-c:v", "copy",
-        "-c:a", "copy",
-        "-f", "flv"
+        "-c", "copy",
+        "-map", "0",
+        "-f", "flv",
+        # THAY ĐỔI QUAN TRỌNG: Báo cho ffmpeg không cần ghi metadata cuối file
+        "-flvflags", "no_duration_filesize"
     ]
     
     active_processes = []
     
     def cleanup():
-        print(f"[{sid}] Cleaning up processes.")
+        print(f"[{sid}] Cleaning up processes for stream.")
         for p in active_processes:
             if p.poll() is None:
                 p.kill()
@@ -304,17 +325,16 @@ def stream_loop(sid, src, dests, loop):
             del PROCESSES[sid]
 
     while True:
-        if sid not in PROCESSES: # Bị dừng từ bên ngoài
-            print(f"[{sid}] Stream loop terminated externally.")
-            cleanup()
+        streams_now = load_streams()
+        if not any(s['id'] == sid for s in streams_now):
+            print(f"[{sid}] Stream was removed from config. Stopping loop.")
             break
 
         print(f"[{sid}] Starting FFmpeg stream (in copy mode)...")
         
         for d in dests:
-            cmd = cmd_base + [d, "-analyzeduration", "2147483647", "-probesize", "2147483647"]
-            cmd[3] = f"{src}?sid={sid}" # Thêm sid để có thể tìm và diệt process chính xác
-            
+            cmd = cmd_base + [d]
+            print(f"[{sid}] Running: {' '.join(cmd)}")
             p = subprocess.Popen(cmd)
             active_processes.append(p)
         
@@ -330,25 +350,19 @@ def stream_loop(sid, src, dests, loop):
         print(f"[{sid}] FFmpeg exited, restarting due to loop=True")
         time.sleep(1)
 
-    # Dọn dẹp cuối cùng
     cleanup()
-    print(f"[{sid}] Stream loop finished.")
-    # Không cần xóa khỏi streams.json ở đây, route /stop sẽ làm việc đó
-
+    final_streams = [s for s in load_streams() if s['id'] != sid]
+    save_streams(final_streams)
+    print(f"[{sid}] Stream loop and cleanup finished.")
 
 def automatic_restore_on_startup():
-    """Thử khôi phục stream từ backup khi khởi động."""
     if not os.path.exists(BACKUP_FILE):
         print("No backup file found, skipping automatic restore.")
         return
-    
     if not os.path.exists(PASS_FILE):
         print("Password file not found, cannot decrypt backup.")
         return
 
-    # Đây là một rủi ro an ninh, vì chúng ta không có plaintext password.
-    # Giải pháp: User sẽ phải tự khôi phục sau khi login.
-    # Phiên bản này sẽ chỉ khôi phục nếu password là default.
     print("Attempting to restore streams from backup...")
     try:
         with open(BACKUP_FILE, 'r') as f:
@@ -359,7 +373,6 @@ def automatic_restore_on_startup():
         
         if decrypted_streams:
             with open(PASS_FILE, 'r') as pf:
-                # Chỉ khôi phục nếu pass hiện tại vẫn là default pass
                 if hash_pass(DEFAULT_PASS) == pf.read():
                     print("Default password detected. Restoring streams from backup.")
                     save_streams(decrypted_streams)
@@ -373,7 +386,6 @@ def automatic_restore_on_startup():
         print(f"Error during automatic restore: {e}")
 
 if __name__ == "__main__":
-    # Chỉ chạy khôi phục tự động khi server chạy ở production, không phải debug mode
     if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         automatic_restore_on_startup()
     app.run(host="0.0.0.0", port=10000)
