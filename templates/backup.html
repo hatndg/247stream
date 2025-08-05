@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Backup & Restore</title>
+    <style>
+        body { font-family: sans-serif; }
+        .alert { padding: 15px; margin-bottom: 20px; border: 1px solid transparent; border-radius: 4px; }
+        .alert-danger { color: #a94442; background-color: #f2dede; border-color: #ebccd1; }
+        .alert-success { color: #3c763d; background-color: #dff0d8; border-color: #d6e9c6; }
+        .container { max-width: 600px; margin: auto; }
+        fieldset { margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Backup & Restore</h2>
+        <p>
+            <a href="/">Home</a> | 
+            <a href="/manage_backup">Backup & Restore</a> | 
+            <a href="/logout">Logout</a>
+        </p>
+        
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            {% for category, message in messages %}
+              <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
+
+        <fieldset>
+            <legend><h3>Download Backup</h3></legend>
+            <p>
+                Download an encrypted backup of all currently defined streams.
+                The backup will be encrypted with your <strong>current</strong> password.
+            </p>
+            {% if backup_exists %}
+                <a href="/backup/download"><button>Download Encrypted Backup</button></a>
+            {% else %}
+                <p><i>No backup file found. One will be created when you change your password or click Download.</i></p>
+                <a href="/backup/download"><button>Create and Download Backup</button></a>
+            {% endif %}
+        </fieldset>
+
+        <fieldset>
+            <legend><h3>Restore from Backup</h3></legend>
+            <p>
+                Upload a previously saved backup file and enter the password that was used to encrypt it.
+                <strong>Warning:</strong> This will stop all current streams and replace them with the ones from the backup.
+            </p>
+            <form action="/backup/restore" method="post" enctype="multipart/form-data">
+                <p>
+                    <label for="backup_file">Backup File (.json):</label><br>
+                    <input type="file" name="backup_file" id="backup_file" required>
+                </p>
+                <p>
+                    <label for="password">Password for this backup file:</label><br>
+                    <input type="password" name="password" id="password" required>
+                </p>
+                <p>
+                    <input type="submit" value="Restore Streams" onclick="return confirm('Are you sure? This will stop and replace all current streams.');">
+                </p>
+            </form>
+        </fieldset>
+    </div>
+</body>
+</html>
