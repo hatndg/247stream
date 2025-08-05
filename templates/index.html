@@ -1,19 +1,67 @@
-<!doctype html><title>Auto Stream</title>
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Auto Stream</title>
+    <style>
+        body { font-family: sans-serif; }
+        .alert { padding: 15px; margin-bottom: 20px; border: 1px solid transparent; border-radius: 4px; }
+        .alert-danger { color: #a94442; background-color: #f2dede; border-color: #ebccd1; }
+        .alert-success { color: #3c763d; background-color: #dff0d8; border-color: #d6e9c6; }
+        .alert-info { color: #31708f; background-color: #d9edf7; border-color: #bce8f1; }
+        .status-running { color: green; }
+        .status-stopped { color: red; }
+    </style>
+</head>
+<body>
 <h2>Auto Streaming System</h2>
-<p><a href="/logout">Logout</a></p>
+<p>
+    <a href="/">Home</a> | 
+    <a href="/manage_backup">Backup & Restore</a> | 
+    <a href="/logout">Logout</a>
+</p>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    {% for category, message in messages %}
+      <div class="alert alert-{{ category }}">{{ message }}</div>
+    {% endfor %}
+  {% endif %}
+{% endwith %}
+
 <form method=post enctype=multipart/form-data>
-    Name: <input name="name"><br>
+    <h3>Create New Stream</h3>
+    Name: <input name="name" required><br>
     Video file: <input type=file name=video><br>
-    Or source URL: <input name="source"><br>
-    Loop video: <input type="checkbox" name="loop"><br>
+    Or source URL (http/rtmp/rtsp): <input name="source" size="50"><br>
+    Loop video: <input type="checkbox" name="loop" checked><br>
     RTMP Destinations (one per line):<br>
-    <textarea name="destinations" rows=4 cols=50></textarea><br>
+    <textarea name="destinations" rows=4 cols=50 required></textarea><br>
     <input type=submit value="Start Streaming">
 </form>
 
 <h3>Running Streams</h3>
-<ul>
-{% for s in streams %}
-  <li>{{ s.name }} - <a href="/stop/{{s.id}}">Stop</a></li>
-{% endfor %}
-</ul>
+<table border="1" cellpadding="5" cellspacing="0">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Source</th>
+            <th>Status</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for s in streams %}
+      <tr>
+        <td>{{ s.name }}</td>
+        <td>{{ s.src }}</td>
+        <td><span class="status-{{ s.status.lower() }}">{{ s.status }}</span></td>
+        <td><a href="/stop/{{s.id}}" onclick="return confirm('Are you sure you want to stop this stream?');">Stop</a></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4">No streams defined.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+</body>
+</html>
